@@ -5,1089 +5,1238 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import {
+  FileText,
   Briefcase,
   Search,
-  FileText,
+  Upload,
+  CheckCircle2,
+  AlertCircle,
+  ExternalLink,
   Sparkles,
-  ShieldCheck,
-  ShieldAlert,
-  Server,
-  RefreshCw,
-  Send,
+  Download,
   Copy,
   Check,
-  ChevronDown,
+  RefreshCw,
   ChevronRight,
-  TrendingUp,
-  Award,
-  AlertTriangle,
-  Info,
+  ArrowLeft,
+  Building,
+  MapPin,
+  DollarSign,
+  Clock,
   Layers,
-  BarChart3,
-  Bot,
-  User,
-  ExternalLink,
-  Cpu
+  Edit3,
+  ShieldCheck,
+  ShieldAlert,
+  Info
 } from 'lucide-react';
+import { jsPDF } from 'jspdf';
 
-interface ToolItem {
+interface ParsedResume {
   name: string;
-  description: string;
-  category: string;
-  enabled: boolean;
-  reason?: string;
+  location: string;
+  professionalSummary: string;
+  yearsOfExperience: string;
+  jobTitles: string[];
+  skills: string[];
+  workExperience: Array<{
+    role: string;
+    company: string;
+    duration?: string;
+    highlights: string[];
+  }>;
+  education: Array<{
+    degree: string;
+    institution: string;
+    year?: string;
+  }>;
+  certifications: string[];
+  projects: string[];
+  rawText: string;
 }
 
-interface ToolExecution {
+interface JobListing {
   id: string;
-  name: string;
-  args: Record<string, any>;
-  result?: any;
-  error?: string;
-  timestamp: string;
+  title: string;
+  company: string;
+  location: string;
+  workArrangement?: 'Remote' | 'Hybrid' | 'On-site' | 'Not Specified';
+  salary?: string;
+  source: 'Indeed' | 'Glassdoor';
+  description: string;
+  responsibilities: string[];
+  qualifications: string[];
+  requiredSkills: string[];
+  preferredSkills: string[];
+  url?: string;
 }
 
-interface MCPStatus {
-  status: 'connected' | 'requires_auth' | 'unavailable' | 'disconnected';
+interface JobMatchResult {
+  job: JobListing;
+  matchScore: number;
+  scoreLabel: string;
+  relevanceExplanation: string;
+  matchingSkills: string[];
+  missingRequirements: string[];
+  unclearRequirements: string[];
+}
+
+interface PolishRecommendation {
+  requirement: string;
+  resumeEvidence: string;
+  recommendation: string;
+}
+
+interface PolishedResumeResult {
+  jobTitle: string;
+  company: string;
+  recommendations: PolishRecommendation[];
+  summaryOfChanges: string[];
+  polishedResumeText: string;
+}
+
+interface McpServerStatus {
+  name: 'Indeed' | 'Glassdoor';
+  status: 'connected' | 'unavailable';
   message: string;
-  endpoint: string;
   discoveredCount: number;
   enabledCount: number;
-  blockedCount: number;
-  tools: ToolItem[];
-  recentExecutions: ToolExecution[];
-  lastChecked: string;
 }
 
-interface ChatMessage {
-  id: string;
-  role: 'user' | 'model';
-  text: string;
-  toolInvocations?: ToolExecution[];
-  timestamp: string;
+interface McpSystemStatus {
+  hasApiKey: boolean;
+  configError?: string;
+  indeed: McpServerStatus;
+  glassdoor: McpServerStatus;
+  overall: 'connected' | 'partial' | 'unavailable';
+  overallMessage: string;
 }
 
 export default function App() {
-  const [mcpStatus, setMcpStatus] = useState<MCPStatus | null>(null);
-  const [loadingStatus, setLoadingStatus] = useState<boolean>(true);
-  const [refreshingMcp, setRefreshingMcp] = useState<boolean>(false);
-  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
-  const [diagnosticTab, setDiagnosticTab] = useState<'tools' | 'executions' | 'policy'>('tools');
-  const [toolSearch, setToolSearch] = useState<string>('');
-  const [toolCategoryFilter, setToolCategoryFilter] = useState<string>('all');
+  // Navigation: strictly "My Resume" and "Matched Jobs"
+  const [activeTab, setActiveTab] = useState<'my-resume' | 'matched-jobs'>('my-resume');
 
-  // Chat State
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: 'welcome',
-      role: 'model',
-      text: `Hello! I am **CareerPilot**, your AI HR & Career Intelligence Specialist powered by Gemini and connected to the Smithery MCP gateway.
+  // MCP Gateway Status
+  const [mcpStatus, setMcpStatus] = useState<McpSystemStatus | null>(null);
+  const [isRefreshingMcp, setIsRefreshingMcp] = useState<boolean>(false);
 
-I can assist you with:
-- **Real-time Job Search & Opportunity Matching**
-- **ATS Resume Analysis & Tailoring**
-- **Tailored Cover Letter Generation**
-- **Labor Market Trends & Global Unemployment Statistics (ILO / OECD)**
-- **Competency Frameworks & Product Management / Tech Skills Roadmap**
+  // Resume State
+  const [rawResumeText, setRawResumeText] = useState<string>('');
+  const [parsedResume, setParsedResume] = useState<ParsedResume | null>(null);
+  const [isAnalyzingResume, setIsAnalyzingResume] = useState<boolean>(false);
+  const [resumeUploaded, setResumeUploaded] = useState<boolean>(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-How can I help advance your career or hiring workflow today?`,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    }
-  ]);
-  const [inputMessage, setInputMessage] = useState<string>('');
-  const [sending, setSending] = useState<boolean>(false);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-  const chatEndRef = useRef<HTMLDivElement>(null);
+  // Job Search State
+  const [searchTitle, setSearchTitle] = useState<string>('');
+  const [searchLocation, setSearchLocation] = useState<string>('');
+  const [searchKeywords, setSearchKeywords] = useState<string>('');
+  const [searchArrangement, setSearchArrangement] = useState<string>('Any');
+  const [isSearchingJobs, setIsSearchingJobs] = useState<boolean>(false);
+  const [jobs, setJobs] = useState<JobListing[]>([]);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [hasSearched, setHasSearched] = useState<boolean>(false);
 
-  // Resume Analyzer Workspace State
-  const [activeView, setActiveView] = useState<'chat' | 'resume-matcher' | 'labor-skills'>('chat');
-  const [resumeText, setResumeText] = useState<string>('');
-  const [jobDescription, setJobDescription] = useState<string>('');
-  const [matchingAction, setMatchingAction] = useState<string | null>(null);
+  // Job Detail & Matching State
+  const [selectedJob, setSelectedJob] = useState<JobListing | null>(null);
+  const [jobMatchResult, setJobMatchResult] = useState<JobMatchResult | null>(null);
+  const [isMatchingResume, setIsMatchingResume] = useState<boolean>(false);
+
+  // Resume Polishing State
+  const [isPolishingResume, setIsPolishingResume] = useState<boolean>(false);
+  const [polishResult, setPolishResult] = useState<PolishedResumeResult | null>(null);
+  const [editableResume, setEditableResume] = useState<string>('');
+  const [copied, setCopied] = useState<boolean>(false);
+
+  // Sub-view inside Matched Jobs: 'list' | 'details' | 'polish'
+  const [jobsSubView, setJobsSubView] = useState<'list' | 'details' | 'polish'>('list');
 
   // Fetch MCP status on mount
   useEffect(() => {
     fetchMcpStatus();
   }, []);
 
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, sending]);
-
   const fetchMcpStatus = async () => {
-    setLoadingStatus(true);
     try {
       const res = await fetch('/api/mcp/status');
       if (res.ok) {
-        const data: MCPStatus = await res.json();
+        const data = await res.json();
         setMcpStatus(data);
       }
-    } catch (err) {
-      console.error('Failed to fetch MCP status', err);
-    } finally {
-      setLoadingStatus(false);
+    } catch (e) {
+      console.error('Failed to fetch MCP status', e);
     }
   };
 
   const handleRefreshMcp = async () => {
-    setRefreshingMcp(true);
+    setIsRefreshingMcp(true);
     try {
       const res = await fetch('/api/mcp/refresh', { method: 'POST' });
       if (res.ok) {
-        const data: MCPStatus = await res.json();
+        const data = await res.json();
         setMcpStatus(data);
       }
-    } catch (err) {
-      console.error('Failed to refresh MCP', err);
+    } catch (e) {
+      console.error('Failed to refresh MCP', e);
     } finally {
-      setRefreshingMcp(false);
+      setIsRefreshingMcp(false);
     }
   };
 
-  const handleSendMessage = async (customPrompt?: string) => {
-    const textToSend = customPrompt || inputMessage;
-    if (!textToSend.trim() || sending) return;
+  // Handle Resume File Upload
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-    const userMsg: ChatMessage = {
-      id: `user_${Date.now()}`,
-      role: 'user',
-      text: textToSend.trim(),
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const content = event.target?.result as string;
+      if (content) {
+        setRawResumeText(content);
+        setResumeUploaded(true);
+        triggerAnalyzeResume(content);
+      }
     };
+    reader.readAsText(file);
+  };
 
-    setMessages(prev => [...prev, userMsg]);
-    if (!customPrompt) setInputMessage('');
-    setSending(true);
+  const triggerAnalyzeResume = async (textToAnalyze: string) => {
+    if (!textToAnalyze.trim()) return;
+    setIsAnalyzingResume(true);
+    try {
+      const res = await fetch('/api/resume/parse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resumeText: textToAnalyze }),
+      });
+      if (res.ok) {
+        const data: ParsedResume = await res.json();
+        setParsedResume(data);
+        setResumeUploaded(true);
+        // Prepopulate search criteria from parsed resume
+        if (data.jobTitles && data.jobTitles.length > 0 && !searchTitle) {
+          setSearchTitle(data.jobTitles[0]);
+        }
+        if (data.location && !searchLocation) {
+          setSearchLocation(data.location);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to parse resume', err);
+    } finally {
+      setIsAnalyzingResume(false);
+    }
+  };
+
+  const handleUseSampleResume = () => {
+    const sample = `Alex Rivera
+Senior Frontend & Full-Stack Engineer
+alex.rivera.dev@gmail.com | Singapore | linkedin.com/in/alexrivera
+
+PROFESSIONAL SUMMARY
+Dynamic Software Engineer with 6+ years of production experience building high-performance web applications with React, TypeScript, and modern cloud technologies. Proven track record leading frontend architecture, driving 40% performance gains, and mentoring engineering team members.
+
+WORK EXPERIENCE
+Senior Frontend Engineer | TechStream Solutions (2022 - Present)
+- Led frontend re-architecture of cloud customer portal using React 18, TypeScript, and Tailwind CSS serving 800,000 monthly active users.
+- Reduced initial bundle size by 45% and improved Core Web Vitals (LCP) from 3.8s to 1.4s.
+- Collaborated closely with Product Managers and UX designers to design intuitive customer analytics dashboards.
+
+Software Engineer | Apex Digital (2019 - 2022)
+- Built interactive single-page applications and RESTful backend microservices in Node.js and Express.
+- Engineered automated CI/CD pipelines reducing release turnaround time from 2 days to under 30 minutes.
+- Maintained 90%+ unit and end-to-end testing coverage using Jest and Playwright.
+
+TECHNICAL SKILLS
+Languages: TypeScript, JavaScript (ESNext), Python, HTML5, CSS3/Tailwind
+Frontend: React, Next.js, Redux Toolkit, Vite, WebSockets, Responsive UI
+Backend & Cloud: Node.js, Express, PostgreSQL, REST APIs, AWS (S3, CloudFront)
+Tools: Git, Docker, Jest, CI/CD, Agile/Scrum
+
+EDUCATION
+Bachelor of Science in Computer Science
+National University of Singapore (2015 - 2019)`;
+
+    setRawResumeText(sample);
+    setResumeUploaded(true);
+    triggerAnalyzeResume(sample);
+  };
+
+  // Job Search
+  const handleSearchJobs = async () => {
+    setIsSearchingJobs(true);
+    setSearchError(null);
+    setHasSearched(true);
 
     try {
-      // Build conversation history format for backend
-      const history = messages
-        .filter(m => m.id !== 'welcome')
-        .map(m => ({
-          role: m.role,
-          text: m.text
-        }));
-
-      const res = await fetch('/api/chat', {
+      const res = await fetch('/api/jobs/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: textToSend.trim(),
-          history
-        })
+          desiredJobTitle: searchTitle || (parsedResume?.jobTitles?.[0]) || 'Software Engineer',
+          preferredLocation: searchLocation || parsedResume?.location || 'Singapore',
+          keywords: searchKeywords,
+          arrangement: searchArrangement,
+          resumeSkills: parsedResume?.skills || [],
+          resumeJobTitles: parsedResume?.jobTitles || [],
+        }),
       });
 
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || `Server responded with ${res.status}`);
-      }
-
       const data = await res.json();
-
-      if (data.mcpStatus) {
-        setMcpStatus(data.mcpStatus);
+      if (data.jobs && data.jobs.length > 0) {
+        setJobs(data.jobs);
+        setSearchError(null);
+      } else {
+        setJobs([]);
+        // Strictly use the truthful upstream error messages
+        if (data.error) {
+          setSearchError(data.error);
+        } else if (data.indeedStatus !== 'Connected' && data.glassdoorStatus !== 'Connected') {
+          setSearchError('Job search is currently unavailable. Please try again later.');
+        } else if (data.indeedStatus !== 'Connected') {
+          setSearchError('Indeed job search is currently unavailable. No matching listings found on Glassdoor.');
+        } else if (data.glassdoorStatus !== 'Connected') {
+          setSearchError('Glassdoor job search is currently unavailable. No matching listings found on Indeed.');
+        } else {
+          setSearchError('No matching job listings found for the specified criteria.');
+        }
       }
-
-      const botMsg: ChatMessage = {
-        id: `bot_${Date.now()}`,
-        role: 'model',
-        text: data.response,
-        toolInvocations: data.recentExecutions || [],
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-
-      setMessages(prev => [...prev, botMsg]);
-    } catch (err: any) {
-      const errorMsg: ChatMessage = {
-        id: `err_${Date.now()}`,
-        role: 'model',
-        text: mcpStatus?.status === 'requires_auth'
-          ? 'The MCP service requires authentication.\n\nWhile external career tools are awaiting credentials, I can still provide expert guidance using standard HR industry benchmarks.'
-          : mcpStatus?.status === 'unavailable'
-            ? 'The career-data MCP service is currently unavailable.\n\nPlease check back shortly or let me assist you with foundational career strategy and resume critique.'
-            : `An error occurred: ${err.message || 'Unable to connect to the assistant'}. Please try again.`,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-      setMessages(prev => [...prev, errorMsg]);
+    } catch {
+      setJobs([]);
+      setSearchError('Job search is currently unavailable. Please try again later.');
     } finally {
-      setSending(false);
+      setIsSearchingJobs(false);
+      setActiveTab('matched-jobs');
+      setJobsSubView('list');
     }
   };
 
-  const copyToClipboard = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
+  // Match Resume to Job
+  const handleSelectJobForMatching = async (job: JobListing) => {
+    setSelectedJob(job);
+    setIsMatchingResume(true);
+    setJobsSubView('details');
+
+    try {
+      const res = await fetch('/api/resume/match', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          resume: parsedResume || rawResumeText,
+          job,
+        }),
+      });
+
+      if (res.ok) {
+        const matchData: JobMatchResult = await res.json();
+        setJobMatchResult(matchData);
+      }
+    } catch (err) {
+      console.error('Failed to match resume to job', err);
+    } finally {
+      setIsMatchingResume(false);
+    }
   };
 
-  const triggerAnalyzeResume = (action: 'compare' | 'tailor' | 'coverletter') => {
-    if (!resumeText.trim()) {
-      alert('Please enter or paste your resume content.');
-      return;
+  // Polish Resume specifically for this job
+  const handlePolishResume = async () => {
+    if (!selectedJob) return;
+    setIsPolishingResume(true);
+    setJobsSubView('polish');
+
+    try {
+      const res = await fetch('/api/resume/polish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          resume: parsedResume || rawResumeText,
+          job: selectedJob,
+        }),
+      });
+
+      if (res.ok) {
+        const data: PolishedResumeResult = await res.json();
+        setPolishResult(data);
+        setEditableResume(data.polishedResumeText);
+      }
+    } catch (err) {
+      console.error('Failed to polish resume', err);
+    } finally {
+      setIsPolishingResume(false);
     }
-    setActiveView('chat');
-    let prompt = '';
-    if (action === 'compare') {
-      prompt = `Please compare this resume against this job description.\n\nRESUME:\n${resumeText}\n\nJOB DESCRIPTION:\n${jobDescription || 'Standard Senior Software Engineer expectations'}\n\nEvaluate fit, provide match score (1-100), identify keyword gaps, and detail ATS recommendations.`;
-    } else if (action === 'tailor') {
-      prompt = `Please tailor my resume for this position:\n\nTARGET ROLE/DESCRIPTION:\n${jobDescription || 'Senior Full-Stack Engineer'}\n\nCURRENT RESUME:\n${resumeText}\n\nHighlight quantifiable impact, optimize phrasing, and align competencies without fabricating experience.`;
-    } else {
-      prompt = `Generate a compelling cover letter for this position:\n\nJOB DESCRIPTION:\n${jobDescription || 'Role at technology company'}\n\nBASED ON MY RESUME:\n${resumeText}\n\nEnsure a professional, engaging tone that articulates unique value.`;
-    }
-    handleSendMessage(prompt);
   };
 
-  const quickPrompts = [
-    { label: 'React Jobs in Singapore', query: 'Find senior React jobs in Singapore.' },
-    { label: 'Unemployment in SG', query: 'What is the unemployment rate in Singapore based on official labor statistics?' },
-    { label: 'PM Skill Roadmap', query: 'What skills should a product manager develop according to core PM frameworks?' },
-    { label: 'Resume ATS Tips', query: 'What are the top 5 ATS resume pitfalls to avoid in technical hiring?' },
-  ];
+  // Copy polished resume
+  const handleCopyResume = () => {
+    navigator.clipboard.writeText(editableResume);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
-  // Filter tools for diagnostic panel
-  const filteredTools = (mcpStatus?.tools || []).filter(tool => {
-    const matchesSearch = tool.name.toLowerCase().includes(toolSearch.toLowerCase()) ||
-      tool.description.toLowerCase().includes(toolSearch.toLowerCase());
-    if (toolCategoryFilter === 'all') return matchesSearch;
-    if (toolCategoryFilter === 'enabled') return matchesSearch && tool.enabled;
-    if (toolCategoryFilter === 'blocked') return matchesSearch && !tool.enabled;
-    return matchesSearch && tool.category === toolCategoryFilter;
-  });
+  // Download PDF
+  const handleDownloadPdf = () => {
+    if (!editableResume) return;
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'pt',
+      format: 'letter',
+    });
+
+    const margin = 45;
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const maxLineWidth = pageWidth - margin * 2;
+
+    doc.setFont('Helvetica', 'normal');
+    doc.setFontSize(10.5);
+
+    const lines = doc.splitTextToSize(editableResume, maxLineWidth);
+    let cursorY = 50;
+    const lineHeight = 15;
+
+    for (let i = 0; i < lines.length; i++) {
+      if (cursorY + lineHeight > doc.internal.pageSize.getHeight() - margin) {
+        doc.addPage();
+        cursorY = margin;
+      }
+      const line = lines[i];
+      if (line.startsWith('# ')) {
+        doc.setFont('Helvetica', 'bold');
+        doc.setFontSize(15);
+        doc.text(line.replace(/^#\s*/, ''), margin, cursorY);
+        doc.setFont('Helvetica', 'normal');
+        doc.setFontSize(10.5);
+        cursorY += lineHeight + 5;
+      } else if (line.startsWith('## ')) {
+        doc.setFont('Helvetica', 'bold');
+        doc.setFontSize(12);
+        cursorY += 4;
+        doc.text(line.replace(/^##\s*/, ''), margin, cursorY);
+        doc.setFont('Helvetica', 'normal');
+        doc.setFontSize(10.5);
+        cursorY += lineHeight + 2;
+      } else {
+        doc.text(line, margin, cursorY);
+        cursorY += lineHeight;
+      }
+    }
+
+    const filename = `${(selectedJob?.title || 'tailored').replace(/[^a-zA-Z0-9_-]/g, '_')}_resume.pdf`;
+    doc.save(filename);
+  };
 
   return (
-    <div className="flex flex-col h-screen bg-slate-950 text-slate-100 font-sans selection:bg-indigo-500/30 selection:text-indigo-200">
-      {/* Top Navigation Bar */}
-      <header className="border-b border-slate-800/80 bg-slate-900/90 backdrop-blur-md px-4 py-3 shrink-0 flex flex-wrap items-center justify-between gap-3 z-20">
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-indigo-500/30 selection:text-indigo-200">
+      {/* Top Header & Navigation */}
+      <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur-md px-6 py-3 shrink-0 flex items-center justify-between sticky top-0 z-30">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center shadow-lg shadow-indigo-500/20 text-white font-bold">
-            <Briefcase className="w-5 h-5" />
+          <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center text-white shadow-md shadow-indigo-600/30">
+            <Briefcase className="w-4 h-4" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-base font-semibold tracking-tight text-white">CareerPilot AI</h1>
-              <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-                Gemini + MCP
-              </span>
-            </div>
-            <p className="text-xs text-slate-400">Smart HR & Career Intelligence Gateway</p>
+            <h1 className="text-sm font-bold text-white tracking-tight leading-none">JobSeeker AI</h1>
+            <p className="text-[11px] text-slate-400">Indeed & Glassdoor Job Matching</p>
           </div>
         </div>
 
-        {/* View Switcher Tabs */}
-        <div className="flex items-center bg-slate-800/70 p-1 rounded-xl border border-slate-700/60 text-xs font-medium">
+        {/* Navigation containing ONLY "My Resume" and "Matched Jobs" */}
+        <nav className="flex items-center bg-slate-800/80 p-1 rounded-xl border border-slate-700/60 text-xs font-medium">
           <button
-            onClick={() => setActiveView('chat')}
-            className={`px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 ${
-              activeView === 'chat'
-                ? 'bg-indigo-600 text-white shadow-sm'
-                : 'text-slate-300 hover:text-white hover:bg-slate-700/50'
-            }`}
-          >
-            <Bot className="w-3.5 h-3.5" />
-            <span>Assistant Chat</span>
-          </button>
-          <button
-            onClick={() => setActiveView('resume-matcher')}
-            className={`px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 ${
-              activeView === 'resume-matcher'
-                ? 'bg-indigo-600 text-white shadow-sm'
+            onClick={() => setActiveTab('my-resume')}
+            className={`px-4 py-1.5 rounded-lg transition-all flex items-center gap-2 ${
+              activeTab === 'my-resume'
+                ? 'bg-indigo-600 text-white shadow-sm font-semibold'
                 : 'text-slate-300 hover:text-white hover:bg-slate-700/50'
             }`}
           >
             <FileText className="w-3.5 h-3.5" />
-            <span>Resume & Matcher</span>
+            <span>My Resume</span>
+            {resumeUploaded && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>}
           </button>
           <button
-            onClick={() => setActiveView('labor-skills')}
-            className={`px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 ${
-              activeView === 'labor-skills'
-                ? 'bg-indigo-600 text-white shadow-sm'
+            onClick={() => setActiveTab('matched-jobs')}
+            className={`px-4 py-1.5 rounded-lg transition-all flex items-center gap-2 ${
+              activeTab === 'matched-jobs'
+                ? 'bg-indigo-600 text-white shadow-sm font-semibold'
                 : 'text-slate-300 hover:text-white hover:bg-slate-700/50'
             }`}
           >
-            <BarChart3 className="w-3.5 h-3.5" />
-            <span>Labor & Skills</span>
+            <Briefcase className="w-3.5 h-3.5" />
+            <span>Matched Jobs</span>
+            {jobs.length > 0 && (
+              <span className="px-1.5 py-0.2 rounded-full bg-indigo-500/20 text-indigo-300 text-[10px] font-mono">
+                {jobs.length}
+              </span>
+            )}
           </button>
-        </div>
+        </nav>
 
-        {/* MCP Status Indicator & Controls */}
-        <div className="flex items-center gap-2">
-          {/* Status Pill */}
-          <div
-            onClick={() => setShowDiagnostics(true)}
-            className="cursor-pointer group flex items-center gap-2 px-3 py-1.5 rounded-xl border bg-slate-800/60 hover:bg-slate-800 transition-all border-slate-700/70 text-xs"
-            title="Click to view MCP Diagnostics & Tool Inspection"
-          >
+        {/* Small MCP Status Indicator */}
+        <div className="flex items-center gap-3 text-xs">
+          <div className="flex items-center gap-3 px-3 py-1.5 rounded-lg bg-slate-800/60 border border-slate-700/50">
+            {/* Indeed MCP Status */}
             <div className="flex items-center gap-1.5">
-              <span className="relative flex h-2 w-2">
-                {mcpStatus?.status === 'connected' ? (
-                  <>
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                  </>
-                ) : mcpStatus?.status === 'requires_auth' ? (
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
-                ) : (
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
-                )}
-              </span>
-              <span className="font-medium text-slate-200">
-                Smithery: {mcpStatus?.status === 'connected' ? 'Connected' : mcpStatus?.status === 'requires_auth' ? 'Requires Auth' : 'Disconnected'}
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  mcpStatus?.indeed.status === 'connected' ? 'bg-emerald-400' : 'bg-rose-500'
+                }`}
+              ></span>
+              <span className="text-slate-300 font-medium">Indeed MCP:</span>
+              <span className={mcpStatus?.indeed.status === 'connected' ? 'text-emerald-400' : 'text-slate-400'}>
+                {mcpStatus?.indeed.status === 'connected'
+                  ? `Connected (${mcpStatus.indeed.enabledCount} tools)`
+                  : 'Unavailable'}
               </span>
             </div>
 
-            <div className="h-3 w-px bg-slate-700 mx-0.5"></div>
+            <div className="h-3 w-px bg-slate-700"></div>
 
-            <div className="text-[11px] text-slate-400 flex items-center gap-2">
-              <span title="Discovered MCP tools">{mcpStatus?.discoveredCount ?? 0} Discovered</span>
-              <span>•</span>
-              <span className="text-emerald-400 font-semibold" title="Enabled Safe Tools">
-                {mcpStatus?.enabledCount ?? 0} Enabled
+            {/* Glassdoor MCP Status */}
+            <div className="flex items-center gap-1.5">
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  mcpStatus?.glassdoor.status === 'connected' ? 'bg-emerald-400' : 'bg-rose-500'
+                }`}
+              ></span>
+              <span className="text-slate-300 font-medium">Glassdoor MCP:</span>
+              <span className={mcpStatus?.glassdoor.status === 'connected' ? 'text-emerald-400' : 'text-slate-400'}>
+                {mcpStatus?.glassdoor.status === 'connected'
+                  ? `Connected (${mcpStatus.glassdoor.enabledCount} tools)`
+                  : 'Unavailable'}
               </span>
             </div>
-
-            <ChevronRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-slate-300 transition-transform" />
           </div>
 
-          {/* Refresh Gateway Button */}
           <button
             onClick={handleRefreshMcp}
-            disabled={refreshingMcp}
-            className="p-1.5 rounded-lg border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white transition-all disabled:opacity-50"
-            title="Reconnect & Refresh MCP Tools"
+            disabled={isRefreshingMcp}
+            className="p-1.5 rounded-lg border border-slate-700 bg-slate-800 text-slate-300 hover:text-white transition-all disabled:opacity-50"
+            title="Refresh MCP Gateway Connections"
           >
-            <RefreshCw className={`w-4 h-4 ${refreshingMcp ? 'animate-spin text-indigo-400' : ''}`} />
+            <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingMcp ? 'animate-spin text-indigo-400' : ''}`} />
           </button>
         </div>
       </header>
 
-      {/* Connection Notice Banners if Requires Auth or Unavailable */}
-      {mcpStatus?.status === 'requires_auth' && (
-        <div className="bg-amber-950/40 border-b border-amber-800/40 px-4 py-2 flex items-center justify-between text-xs text-amber-200/90">
-          <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-            <span>
-              <strong>The MCP service requires authentication.</strong> External tool calls will resume once server credentials are provided. Gemini is actively answering with core HR knowledge.
-            </span>
-          </div>
-          <button
-            onClick={() => setShowDiagnostics(true)}
-            className="underline hover:text-amber-100 font-medium ml-3 shrink-0"
-          >
-            View Details
-          </button>
-        </div>
-      )}
-
-      {mcpStatus?.status === 'unavailable' && (
-        <div className="bg-rose-950/40 border-b border-rose-800/40 px-4 py-2 flex items-center justify-between text-xs text-rose-200/90">
-          <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
-            <span>
-              <strong>The career-data MCP service is currently unavailable.</strong> CareerPilot is operating in standalone reasoning mode.
-            </span>
-          </div>
-          <button
-            onClick={handleRefreshMcp}
-            className="underline hover:text-rose-100 font-medium ml-3 shrink-0"
-          >
-            Retry Connection
-          </button>
-        </div>
-      )}
-
-      {/* Main Workspace Body */}
-      <div className="flex-1 overflow-hidden flex relative">
-        {/* VIEW 1: ASSISTANT CHAT */}
-        {activeView === 'chat' && (
-          <div className="flex-1 flex flex-col h-full bg-slate-950">
-            {/* Quick Suggestions Bar */}
-            <div className="px-4 py-2.5 bg-slate-900/50 border-b border-slate-800/60 overflow-x-auto flex items-center gap-2 text-xs no-scrollbar">
-              <span className="text-slate-400 font-medium flex items-center gap-1 shrink-0">
-                <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-                Suggestions:
-              </span>
-              {quickPrompts.map((item, idx) => (
-                <button
-                  key={idx}
-                  onClick={() => handleSendMessage(item.query)}
-                  className="px-2.5 py-1 rounded-full bg-slate-800/80 hover:bg-slate-700/80 text-slate-300 hover:text-white border border-slate-700/50 whitespace-nowrap transition-colors"
-                >
-                  {item.label}
-                </button>
-              ))}
+      {/* Main Content Area */}
+      <main className="flex-1 flex flex-col max-w-6xl w-full mx-auto p-6 space-y-6">
+        {/* Server Configuration Error Notice when HASDATA_API_KEY is missing */}
+        {mcpStatus && !mcpStatus.hasApiKey && (
+          <div className="p-4 rounded-2xl bg-amber-950/40 border border-amber-800/60 text-amber-200 text-xs flex items-start gap-3 shadow-sm">
+            <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-semibold text-amber-300">Server Configuration Required: HASDATA_API_KEY</span>
+                <span className="px-2 py-0.5 rounded bg-amber-900/60 border border-amber-700/50 text-[10px] font-mono text-amber-200">
+                  server-side only
+                </span>
+              </div>
+              <p className="text-slate-300 leading-relaxed text-[11px]">
+                {mcpStatus.configError ||
+                  'HASDATA_API_KEY is not configured in server environment variables. When running locally or in Vercel, set HASDATA_API_KEY in your server environment settings to connect to Indeed and Glassdoor MCP servers. Mock or fallback job data is disabled.'}
+              </p>
             </div>
+          </div>
+        )}
 
-            {/* Chat Messages Scrollable Area */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
-              {messages.map(msg => (
-                <div
-                  key={msg.id}
-                  className={`flex gap-3 max-w-3xl ${
-                    msg.role === 'user' ? 'ml-auto flex-row-reverse' : 'mr-auto'
-                  }`}
-                >
-                  {/* Avatar */}
-                  <div
-                    className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 text-white font-medium text-xs shadow-md ${
-                      msg.role === 'user'
-                        ? 'bg-gradient-to-tr from-indigo-500 to-indigo-600'
-                        : 'bg-gradient-to-tr from-slate-800 to-slate-700 border border-slate-700'
-                    }`}
+        {/* TAB 1: MY RESUME */}
+        {activeTab === 'my-resume' && (
+          <div className="space-y-6">
+            {!resumeUploaded ? (
+              /* HOME SCREEN (No Resume Uploaded Yet) */
+              <div className="text-center py-12 px-4 max-w-2xl mx-auto space-y-6">
+                <div className="w-14 h-14 rounded-2xl bg-indigo-600/10 border border-indigo-500/20 text-indigo-400 flex items-center justify-center mx-auto shadow-inner">
+                  <FileText className="w-7 h-7" />
+                </div>
+                <div className="space-y-2">
+                  <h2 className="text-3xl font-extrabold text-white tracking-tight">Find jobs that fit you.</h2>
+                  <p className="text-slate-400 text-sm leading-relaxed max-w-xl mx-auto">
+                    Upload your resume and we'll find relevant jobs from Indeed and Glassdoor, then help tailor your
+                    resume to the job you want.
+                  </p>
+                </div>
+
+                <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-3">
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    onChange={handleFileUpload}
+                    accept=".txt,.pdf,.doc,.docx"
+                    className="hidden"
+                  />
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isAnalyzingResume}
+                    className="w-full sm:w-auto px-6 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm shadow-lg shadow-indigo-600/20 transition-all flex items-center justify-center gap-2"
                   >
-                    {msg.role === 'user' ? <User className="w-4 h-4" /> : <Bot className="w-4 h-4 text-indigo-300" />}
+                    <Upload className="w-4 h-4" />
+                    <span>Upload Resume</span>
+                  </button>
+                  <button
+                    onClick={handleUseSampleResume}
+                    disabled={isAnalyzingResume}
+                    className="w-full sm:w-auto px-5 py-3 rounded-xl border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-200 text-sm font-medium transition-all"
+                  >
+                    Use Sample Resume
+                  </button>
+                </div>
+
+                {/* Paste Text Option */}
+                <div className="pt-6 border-t border-slate-800 text-left">
+                  <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+                    Or paste your resume text:
+                  </label>
+                  <textarea
+                    rows={6}
+                    value={rawResumeText}
+                    onChange={(e) => setRawResumeText(e.target.value)}
+                    placeholder="Paste your work experience, skills, and education here..."
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl p-3 text-xs font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                  />
+                  <div className="mt-2 flex justify-end">
+                    <button
+                      onClick={() => triggerAnalyzeResume(rawResumeText)}
+                      disabled={!rawResumeText.trim() || isAnalyzingResume}
+                      className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-white transition-all disabled:opacity-50"
+                    >
+                      {isAnalyzingResume ? 'Analyzing Resume...' : 'Analyze Pasted Resume'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              /* RESUME UPLOADED VIEW */
+              <div className="space-y-6">
+                {/* Upload Status Banner */}
+                <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex flex-wrap items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                      <CheckCircle2 className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-sm text-white">Resume uploaded ✓</span>
+                        {parsedResume?.name && (
+                          <span className="text-xs text-slate-400">({parsedResume.name})</span>
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-400">
+                        Extracted {parsedResume?.skills?.length || 0} skills,{' '}
+                        {parsedResume?.workExperience?.length || 0} work experiences.
+                      </p>
+                    </div>
                   </div>
 
-                  {/* Message Bubble */}
-                  <div
-                    className={`group relative rounded-2xl p-4 text-sm leading-relaxed border transition-all ${
-                      msg.role === 'user'
-                        ? 'bg-indigo-600 text-white border-indigo-500/50 rounded-tr-sm shadow-md'
-                        : 'bg-slate-900/90 text-slate-200 border-slate-800/80 rounded-tl-sm shadow-sm'
-                    }`}
-                  >
-                    {/* Tool Invocation Badges */}
-                    {msg.toolInvocations && msg.toolInvocations.length > 0 && (
-                      <div className="mb-3 space-y-1.5 pb-2 border-b border-slate-800">
-                        <div className="text-[11px] font-semibold tracking-wide text-indigo-400 uppercase flex items-center gap-1.5">
-                          <Cpu className="w-3.5 h-3.5" />
-                          <span>Executed MCP Tools ({msg.toolInvocations.length})</span>
-                        </div>
-                        {msg.toolInvocations.map((exec, i) => (
-                          <div
-                            key={i}
-                            className="bg-slate-950/70 border border-slate-800 rounded-lg p-2 text-xs font-mono text-slate-300"
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        setResumeUploaded(false);
+                        setParsedResume(null);
+                        setRawResumeText('');
+                      }}
+                      className="px-3 py-1.5 rounded-lg border border-slate-800 bg-slate-950 text-xs text-slate-400 hover:text-white transition-colors"
+                    >
+                      Change Resume
+                    </button>
+                    <button
+                      onClick={() => {
+                        setActiveTab('matched-jobs');
+                        if (!hasSearched) handleSearchJobs();
+                      }}
+                      className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white shadow-sm transition-all flex items-center gap-1.5"
+                    >
+                      <span>Find Matching Jobs</span>
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Parsed Resume Breakdown */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  {/* Left Column: Summary & Skills */}
+                  <div className="space-y-4">
+                    <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+                      <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                        Extracted Profile
+                      </h3>
+                      <div>
+                        <span className="text-xs text-slate-500">Name:</span>
+                        <p className="text-sm font-semibold text-white">{parsedResume?.name || 'Not Specified'}</p>
+                      </div>
+                      <div>
+                        <span className="text-xs text-slate-500">Location:</span>
+                        <p className="text-sm text-slate-200">{parsedResume?.location || 'Not Specified'}</p>
+                      </div>
+                      <div>
+                        <span className="text-xs text-slate-500">Years of Experience:</span>
+                        <p className="text-sm text-slate-200">{parsedResume?.yearsOfExperience || 'Not Specified'}</p>
+                      </div>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+                      <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                        Identified Skills ({parsedResume?.skills?.length || 0})
+                      </h3>
+                      <div className="flex flex-wrap gap-1.5">
+                        {parsedResume?.skills?.map((skill, idx) => (
+                          <span
+                            key={idx}
+                            className="px-2 py-0.5 rounded-md bg-slate-800 border border-slate-700 text-xs text-slate-300 font-mono"
                           >
-                            <div className="flex items-center justify-between text-indigo-300 font-semibold mb-1">
-                              <span>⚙ {exec.name}</span>
-                              <span className="text-[10px] text-slate-500">{new Date(exec.timestamp).toLocaleTimeString()}</span>
-                            </div>
-                            {exec.args && Object.keys(exec.args).length > 0 && (
-                              <div className="text-[11px] text-slate-400 truncate">
-                                Args: {JSON.stringify(exec.args)}
-                              </div>
-                            )}
-                          </div>
+                            {skill}
+                          </span>
                         ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Middle / Right: Work Experience & Summary */}
+                  <div className="md:col-span-2 space-y-4">
+                    {parsedResume?.professionalSummary && (
+                      <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+                        <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                          Professional Summary
+                        </h3>
+                        <p className="text-xs text-slate-300 leading-relaxed">
+                          {parsedResume.professionalSummary}
+                        </p>
                       </div>
                     )}
 
-                    {/* Markdown-like Text Formatting */}
-                    <div className="whitespace-pre-wrap space-y-2">
-                      {msg.text.split('\n\n').map((paragraph, pIdx) => (
-                        <p key={pIdx}>
-                          {paragraph.split('**').map((part, bIdx) =>
-                            bIdx % 2 === 1 ? <strong key={bIdx} className="font-semibold text-white">{part}</strong> : part
-                          )}
-                        </p>
-                      ))}
-                    </div>
-
-                    {/* Footer / Copy Button */}
-                    <div className="flex items-center justify-between mt-2 pt-2 text-[11px] text-slate-400/80 border-t border-white/5">
-                      <span>{msg.timestamp}</span>
-                      <button
-                        onClick={() => copyToClipboard(msg.text, msg.id)}
-                        className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 hover:text-white"
-                        title="Copy text"
-                      >
-                        {copiedId === msg.id ? (
-                          <>
-                            <Check className="w-3 h-3 text-emerald-400" />
-                            <span className="text-emerald-400">Copied</span>
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="w-3 h-3" />
-                            <span>Copy</span>
-                          </>
-                        )}
-                      </button>
+                    <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-4">
+                      <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                        Work Experience
+                      </h3>
+                      {parsedResume?.workExperience && parsedResume.workExperience.length > 0 ? (
+                        <div className="space-y-4">
+                          {parsedResume.workExperience.map((exp, idx) => (
+                            <div key={idx} className="border-l-2 border-indigo-500/40 pl-3 space-y-1">
+                              <div className="flex items-center justify-between">
+                                <span className="font-semibold text-sm text-white">{exp.role}</span>
+                                <span className="text-xs text-slate-500">{exp.duration}</span>
+                              </div>
+                              <div className="text-xs text-indigo-400 font-medium">{exp.company}</div>
+                              {exp.highlights && exp.highlights.length > 0 && (
+                                <ul className="list-disc list-inside text-xs text-slate-400 space-y-1 pt-1">
+                                  {exp.highlights.map((h, hIdx) => (
+                                    <li key={hIdx} className="leading-relaxed">
+                                      {h}
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-slate-500">No structured roles extracted.</p>
+                      )}
                     </div>
                   </div>
                 </div>
-              ))}
-
-              {sending && (
-                <div className="flex gap-3 max-w-xl mr-auto">
-                  <div className="w-8 h-8 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center shrink-0">
-                    <Bot className="w-4 h-4 text-indigo-400 animate-pulse" />
-                  </div>
-                  <div className="bg-slate-900 border border-slate-800 rounded-2xl rounded-tl-sm p-4 text-sm text-slate-400 flex items-center gap-2">
-                    <div className="flex space-x-1">
-                      <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-                      <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-                      <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce"></div>
-                    </div>
-                    <span className="text-xs text-slate-400">Querying Gemini & inspecting MCP tools...</span>
-                  </div>
-                </div>
-              )}
-              <div ref={chatEndRef} />
-            </div>
-
-            {/* Input Bar */}
-            <div className="p-4 bg-slate-900/70 border-t border-slate-800/80 backdrop-blur-sm">
-              <form
-                onSubmit={e => {
-                  e.preventDefault();
-                  handleSendMessage();
-                }}
-                className="flex items-center gap-2 max-w-4xl mx-auto"
-              >
-                <div className="relative flex-1">
-                  <input
-                    type="text"
-                    value={inputMessage}
-                    onChange={e => setInputMessage(e.target.value)}
-                    placeholder="Ask about jobs, resume tailoring, ATS evaluation, PM skills, or labor market statistics..."
-                    disabled={sending}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all pr-10"
-                  />
-                  <span className="absolute right-3 top-3.5 text-xs text-slate-600">
-                    ⌘ + Enter
-                  </span>
-                </div>
-                <button
-                  type="submit"
-                  disabled={!inputMessage.trim() || sending}
-                  className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:hover:bg-indigo-600 text-white font-medium p-3 rounded-xl transition-all shadow-md shadow-indigo-600/20 flex items-center justify-center shrink-0"
-                >
-                  <Send className="w-4 h-4" />
-                </button>
-              </form>
-              <div className="text-[11px] text-slate-500 text-center mt-2 flex items-center justify-center gap-3">
-                <span>Smithery Endpoint: <code className="text-slate-400 font-mono">mode=smart</code></span>
-                <span>•</span>
-                <span>Read-Only Safety Policy Enforced</span>
-                <span>•</span>
-                <span>Zero Client-Side Credentials</span>
               </div>
-            </div>
+            )}
           </div>
         )}
 
-        {/* VIEW 2: RESUME & MATCHER WORKSPACE */}
-        {activeView === 'resume-matcher' && (
-          <div className="flex-1 overflow-y-auto p-6 bg-slate-950">
-            <div className="max-w-5xl mx-auto space-y-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h2 className="text-xl font-bold text-white tracking-tight">Resume & Job Description Analyzer</h2>
-                  <p className="text-sm text-slate-400">
-                    Evaluate compatibility, tailor experience bullets, and generate custom cover letters powered by Gemini.
-                  </p>
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => {
-                      setResumeText(`JOHN DOE
-Senior Full-Stack Software Engineer
-Contact: john.doe@email.com | github.com/johndoe | Singapore
-
-SUMMARY:
-Results-driven software engineer with 6+ years of experience designing high-scale React, TypeScript, and Node.js microservices. Proven success leading technical architecture, improving page load by 42%, and mentoring 8 junior developers.
-
-EXPERIENCE:
-Staff Software Engineer | FinTech Global (2022 - Present)
-- Architected enterprise customer portal using React 18, Vite, TypeScript, and Tailwind CSS serving 1.5M monthly active users.
-- Built automated CI/CD pipeline reducing release cycle times by 65%.
-- Partnered with product and HR to define hiring rubrics and interview over 40 engineering candidates.
-
-Software Engineer | CloudScale Systems (2019 - 2022)
-- Developed RESTful and GraphQL backend microservices in Express, PostgreSQL, and Redis.
-- Implemented real-time dashboard with WebSockets handling 10k concurrent active streams.`);
-                      setJobDescription(`Senior React Engineer
-Location: Singapore (Hybrid)
-Company: TechCorp Innovations
-
-RESPONSIBILITIES:
-- Build next-generation web applications using React, TypeScript, and modern frontend tooling.
-- Collaborate closely with Product Managers and Designers to iterate rapidly on user experience.
-- Maintain high code quality, automated testing, and web performance standards.
-
-REQUIREMENTS:
-- 5+ years building production web apps with React & modern JavaScript/TypeScript.
-- Strong knowledge of state management, responsive UI frameworks (Tailwind CSS), and web performance.
-- Experience with full-stack Node.js or cloud services is a plus.
-- Excellent communication and cross-functional leadership skills.`);
-                    }}
-                    className="px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800 text-xs text-slate-300 hover:text-white transition-colors"
-                  >
-                    Load Sample Data
-                  </button>
-                  <button
-                    onClick={() => {
-                      setResumeText('');
-                      setJobDescription('');
-                    }}
-                    className="px-3 py-1.5 rounded-lg border border-slate-800 bg-slate-900 text-xs text-slate-400 hover:text-slate-200 transition-colors"
-                  >
-                    Clear
-                  </button>
-                </div>
-              </div>
-
-              {/* Side by side inputs */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center justify-between">
-                    <span>1. Candidate Resume</span>
-                    <span className="text-[11px] text-slate-500 font-normal">{resumeText.length} characters</span>
-                  </label>
-                  <textarea
-                    value={resumeText}
-                    onChange={e => setResumeText(e.target.value)}
-                    placeholder="Paste candidate resume or CV text here..."
-                    rows={14}
-                    className="w-full bg-slate-900/90 border border-slate-800 rounded-xl p-4 text-xs font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center justify-between">
-                    <span>2. Target Job Description</span>
-                    <span className="text-[11px] text-slate-500 font-normal">{jobDescription.length} characters</span>
-                  </label>
-                  <textarea
-                    value={jobDescription}
-                    onChange={e => setJobDescription(e.target.value)}
-                    placeholder="Paste job posting, required qualifications, and duties here..."
-                    rows={14}
-                    className="w-full bg-slate-900/90 border border-slate-800 rounded-xl p-4 text-xs font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-                  />
-                </div>
-              </div>
-
-              {/* Action Buttons */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <button
-                  onClick={() => triggerAnalyzeResume('compare')}
-                  className="p-4 rounded-xl bg-gradient-to-r from-indigo-950/80 to-slate-900 border border-indigo-700/40 hover:border-indigo-500 text-left transition-all group shadow-sm"
-                >
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="font-semibold text-sm text-indigo-300 group-hover:text-indigo-200 flex items-center gap-2">
-                      <Sparkles className="w-4 h-4 text-indigo-400" />
-                      ATS Compatibility Match
-                    </span>
-                    <ChevronRight className="w-4 h-4 text-slate-500 group-hover:text-slate-300" />
-                  </div>
-                  <p className="text-xs text-slate-400">
-                    Calculate 1-100 fit score, key requirement matches, and missing qualifications.
-                  </p>
-                </button>
-
-                <button
-                  onClick={() => triggerAnalyzeResume('tailor')}
-                  className="p-4 rounded-xl bg-gradient-to-r from-violet-950/80 to-slate-900 border border-violet-700/40 hover:border-violet-500 text-left transition-all group shadow-sm"
-                >
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="font-semibold text-sm text-violet-300 group-hover:text-violet-200 flex items-center gap-2">
-                      <FileText className="w-4 h-4 text-violet-400" />
-                      Tailor Experience Bullets
-                    </span>
-                    <ChevronRight className="w-4 h-4 text-slate-500 group-hover:text-slate-300" />
-                  </div>
-                  <p className="text-xs text-slate-400">
-                    Re-align resume achievements to match target job keywords and expectations.
-                  </p>
-                </button>
-
-                <button
-                  onClick={() => triggerAnalyzeResume('coverletter')}
-                  className="p-4 rounded-xl bg-gradient-to-r from-emerald-950/80 to-slate-900 border border-emerald-700/40 hover:border-emerald-500 text-left transition-all group shadow-sm"
-                >
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="font-semibold text-sm text-emerald-300 group-hover:text-emerald-200 flex items-center gap-2">
-                      <Award className="w-4 h-4 text-emerald-400" />
-                      Generate Cover Letter
-                    </span>
-                    <ChevronRight className="w-4 h-4 text-slate-500 group-hover:text-slate-300" />
-                  </div>
-                  <p className="text-xs text-slate-400">
-                    Draft a customized, high-converting cover letter based on candidate strengths.
-                  </p>
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* VIEW 3: LABOR & SKILLS EXPLORER */}
-        {activeView === 'labor-skills' && (
-          <div className="flex-1 overflow-y-auto p-6 bg-slate-950">
-            <div className="max-w-5xl mx-auto space-y-6">
-              <div>
-                <h2 className="text-xl font-bold text-white tracking-tight">Labor Market & Skill Taxonomy Navigator</h2>
-                <p className="text-sm text-slate-400">
-                  Ground career conversations in ILOSTAT, OECD market metrics, and standardized skill ontologies.
-                </p>
-              </div>
-
-              {/* Cards Grid */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Labor Stats Card */}
-                <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-4">
-                  <div className="flex items-center gap-3 text-indigo-400 font-semibold">
-                    <div className="w-8 h-8 rounded-lg bg-indigo-500/10 flex items-center justify-center border border-indigo-500/20">
-                      <TrendingUp className="w-4 h-4" />
+        {/* TAB 2: MATCHED JOBS */}
+        {activeTab === 'matched-jobs' && (
+          <div className="space-y-6">
+            {/* SUB-VIEW 1: JOB SEARCH & RESULTS LIST */}
+            {jobsSubView === 'list' && (
+              <div className="space-y-6">
+                {/* Search & Filter Header Bar */}
+                <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-4 shadow-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-lg font-bold text-white tracking-tight">Matched Jobs</h2>
+                      <p className="text-xs text-slate-400">
+                        Find openings matching your resume across Indeed and Glassdoor.
+                      </p>
                     </div>
-                    <span>Global & Regional Labor Statistics</span>
+
+                    <button
+                      onClick={handleSearchJobs}
+                      disabled={isSearchingJobs}
+                      className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-semibold text-xs transition-all shadow-md shadow-indigo-600/20 flex items-center gap-2"
+                    >
+                      <Search className={`w-3.5 h-3.5 ${isSearchingJobs ? 'animate-spin' : ''}`} />
+                      <span>{isSearchingJobs ? 'Searching Indeed & Glassdoor...' : 'Search Jobs'}</span>
+                    </button>
                   </div>
-                  <p className="text-xs text-slate-300 leading-relaxed">
-                    Retrieve employment ratios, youth unemployment, sector participation, and labor trends backed by international agencies like ILO and OECD.
-                  </p>
-                  <div className="space-y-2 pt-2">
-                    {[
-                      'What is the unemployment rate in Singapore?',
-                      'Compare tech sector employment trends in OECD countries',
-                      'What are the key labor statistics for Southeast Asia tech workers?'
-                    ].map((query, i) => (
-                      <button
-                        key={i}
-                        onClick={() => {
-                          setActiveView('chat');
-                          handleSendMessage(query);
-                        }}
-                        className="w-full text-left p-2.5 rounded-xl bg-slate-950 hover:bg-slate-800/80 border border-slate-800 hover:border-slate-700 text-xs text-slate-300 flex items-center justify-between group transition-all"
-                      >
-                        <span className="truncate">{query}</span>
-                        <ChevronRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-indigo-400 shrink-0 ml-2" />
-                      </button>
-                    ))}
-                  </div>
-                </div>
 
-                {/* Skills Card */}
-                <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-4">
-                  <div className="flex items-center gap-3 text-violet-400 font-semibold">
-                    <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center border border-violet-500/20">
-                      <Award className="w-4 h-4" />
-                    </div>
-                    <span>Competency & Skill Frameworks</span>
-                  </div>
-                  <p className="text-xs text-slate-300 leading-relaxed">
-                    Explore standardized frameworks such as pm-skills and skill-repo to guide progression from Associate to Principal roles.
-                  </p>
-                  <div className="space-y-2 pt-2">
-                    {[
-                      'What skills should a product manager develop?',
-                      'List core competencies for an AI Product Manager',
-                      'Provide engineering ladder skills from Mid-level to Staff'
-                    ].map((query, i) => (
-                      <button
-                        key={i}
-                        onClick={() => {
-                          setActiveView('chat');
-                          handleSendMessage(query);
-                        }}
-                        className="w-full text-left p-2.5 rounded-xl bg-slate-950 hover:bg-slate-800/80 border border-slate-800 hover:border-slate-700 text-xs text-slate-300 flex items-center justify-between group transition-all"
-                      >
-                        <span className="truncate">{query}</span>
-                        <ChevronRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-violet-400 shrink-0 ml-2" />
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {/* Status Note */}
-              <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 text-xs text-slate-400 flex items-start gap-3">
-                <Info className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
-                <div>
-                  <span className="font-semibold text-slate-300">Dynamic Tool Dispatch: </span>
-                  When tools from ILOSTAT, OECD, or skill taxonomies are exposed by the Smithery gateway, Gemini selects and queries them directly. In the event of gateway unavailability or authentication requirements, Gemini falls back to structured reasoning.
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* DIAGNOSTIC MODAL & TOOL INSPECTOR */}
-      {showDiagnostics && (
-        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-4xl max-h-[85vh] flex flex-col shadow-2xl overflow-hidden">
-            {/* Modal Header */}
-            <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/50">
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
-                  <Server className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="font-semibold text-white text-base">Smithery MCP Gateway Diagnostics</h3>
-                  <p className="text-xs text-slate-400">
-                    Discovered tools, safety allowlist evaluation, and live session telemetry
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowDiagnostics(false)}
-                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition-colors"
-              >
-                ✕
-              </button>
-            </div>
-
-            {/* Subheader summary stats */}
-            <div className="px-6 py-3 bg-slate-950/80 border-b border-slate-800/80 grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
-              <div>
-                <span className="text-slate-500 block">Gateway Status</span>
-                <span className={`font-semibold capitalize ${
-                  mcpStatus?.status === 'connected' ? 'text-emerald-400' :
-                  mcpStatus?.status === 'requires_auth' ? 'text-amber-400' : 'text-rose-400'
-                }`}>
-                  ● {mcpStatus?.status === 'requires_auth' ? 'Requires Auth' : (mcpStatus?.status || 'Disconnected')}
-                </span>
-              </div>
-              <div>
-                <span className="text-slate-500 block">Discovered Tools</span>
-                <span className="font-semibold text-slate-200">{mcpStatus?.discoveredCount ?? 0}</span>
-              </div>
-              <div>
-                <span className="text-slate-500 block">Enabled (Safe Read-Only)</span>
-                <span className="font-semibold text-emerald-400">{mcpStatus?.enabledCount ?? 0}</span>
-              </div>
-              <div>
-                <span className="text-slate-500 block">Blocked (Side Effects)</span>
-                <span className="font-semibold text-rose-400">{mcpStatus?.blockedCount ?? 0}</span>
-              </div>
-            </div>
-
-            {/* Diagnostic Tabs */}
-            <div className="px-6 pt-3 border-b border-slate-800 flex gap-4 text-xs font-medium">
-              <button
-                onClick={() => setDiagnosticTab('tools')}
-                className={`pb-2 border-b-2 transition-colors ${
-                  diagnosticTab === 'tools'
-                    ? 'border-indigo-500 text-indigo-400'
-                    : 'border-transparent text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Discovered Tools ({mcpStatus?.discoveredCount ?? 0})
-              </button>
-              <button
-                onClick={() => setDiagnosticTab('executions')}
-                className={`pb-2 border-b-2 transition-colors ${
-                  diagnosticTab === 'executions'
-                    ? 'border-indigo-500 text-indigo-400'
-                    : 'border-transparent text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Tool Executions Log ({mcpStatus?.recentExecutions?.length ?? 0})
-              </button>
-              <button
-                onClick={() => setDiagnosticTab('policy')}
-                className={`pb-2 border-b-2 transition-colors ${
-                  diagnosticTab === 'policy'
-                    ? 'border-indigo-500 text-indigo-400'
-                    : 'border-transparent text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Safety & Filtering Rules
-              </button>
-            </div>
-
-            {/* Tab Body */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-4">
-              {diagnosticTab === 'tools' && (
-                <div className="space-y-4">
-                  {/* Search and Category Filter */}
-                  <div className="flex flex-wrap items-center gap-3">
-                    <div className="relative flex-1 min-w-[200px]">
-                      <Search className="w-3.5 h-3.5 absolute left-3 top-3 text-slate-500" />
+                  {/* Filter Controls */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 pt-2">
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-400 block mb-1">Desired Job Title</label>
                       <input
                         type="text"
-                        value={toolSearch}
-                        onChange={e => setToolSearch(e.target.value)}
-                        placeholder="Filter tools by name or description..."
-                        className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                        value={searchTitle}
+                        onChange={(e) => setSearchTitle(e.target.value)}
+                        placeholder="e.g. Senior Frontend Engineer"
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500"
                       />
                     </div>
-                    <select
-                      value={toolCategoryFilter}
-                      onChange={e => setToolCategoryFilter(e.target.value)}
-                      className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-300 focus:outline-none focus:border-indigo-500"
-                    >
-                      <option value="all">All Categories</option>
-                      <option value="enabled">Safe / Enabled Only</option>
-                      <option value="blocked">Blocked Only</option>
-                      <option value="search">Job Search</option>
-                      <option value="analytics">Labor Stats</option>
-                      <option value="skills">Skills Frameworks</option>
-                      <option value="resume_analysis">Resume Analysis</option>
-                    </select>
-                  </div>
 
-                  {/* Endpoint Information */}
-                  <div className="p-3 rounded-lg bg-slate-950/80 border border-slate-800/80 flex items-center justify-between text-xs">
-                    <span className="text-slate-400">Gateway URL:</span>
-                    <code className="text-indigo-300 font-mono select-all">
-                      {mcpStatus?.endpoint || 'https://mcp.smithery.ai/zhouwenwen0121?mode=smart'}
-                    </code>
-                  </div>
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-400 block mb-1">Location</label>
+                      <input
+                        type="text"
+                        value={searchLocation}
+                        onChange={(e) => setSearchLocation(e.target.value)}
+                        placeholder="e.g. Singapore, Remote"
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
 
-                  {/* Tools List */}
-                  {filteredTools.length > 0 ? (
-                    <div className="grid grid-cols-1 gap-3">
-                      {filteredTools.map((tool, idx) => (
-                        <div
-                          key={idx}
-                          className={`p-3.5 rounded-xl border text-xs transition-all ${
-                            tool.enabled
-                              ? 'bg-slate-950/80 border-slate-800'
-                              : 'bg-rose-950/20 border-rose-900/40'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between mb-1.5">
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-400 block mb-1">Keywords / Skills</label>
+                      <input
+                        type="text"
+                        value={searchKeywords}
+                        onChange={(e) => setSearchKeywords(e.target.value)}
+                        placeholder="e.g. React, TypeScript, AWS"
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-400 block mb-1">Work Arrangement</label>
+                      <select
+                        value={searchArrangement}
+                        onChange={(e) => setSearchArrangement(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-300 focus:outline-none focus:border-indigo-500"
+                      >
+                        <option value="Any">Any Arrangement</option>
+                        <option value="Remote">Remote</option>
+                        <option value="Hybrid">Hybrid</option>
+                        <option value="On-site">On-site</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Search Error / Status Banner */}
+                {searchError && (
+                  <div
+                    className={`p-4 rounded-xl border text-xs flex items-start gap-3 ${
+                      searchError.includes('Configuration Error') || searchError.includes('HASDATA_API_KEY')
+                        ? 'bg-rose-950/40 border-rose-800/60 text-rose-200'
+                        : 'bg-slate-900 border-amber-900/40 text-amber-300'
+                    }`}
+                  >
+                    <AlertCircle
+                      className={`w-4 h-4 shrink-0 mt-0.5 ${
+                        searchError.includes('Configuration Error') || searchError.includes('HASDATA_API_KEY')
+                          ? 'text-rose-400'
+                          : 'text-amber-400'
+                      }`}
+                    />
+                    <div className="space-y-1">
+                      <p className="font-semibold text-white">{searchError}</p>
+                      <p className="text-slate-300 text-[11px] leading-relaxed">
+                        {searchError.includes('Configuration Error') || searchError.includes('HASDATA_API_KEY')
+                          ? 'Configure HASDATA_API_KEY in your server environment variables (e.g. Vercel Project Settings > Environment Variables) to enable live job discovery. The application strictly avoids generating mock or fallback job data.'
+                          : 'The system queries real live MCP endpoints (Indeed & Glassdoor) without generating fake sample listings.'}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Job Cards List */}
+                {jobs.length > 0 ? (
+                  <div className="grid grid-cols-1 gap-4">
+                    {jobs.map((job) => (
+                      <div
+                        key={job.id}
+                        className="p-5 rounded-2xl bg-slate-900/90 border border-slate-800 hover:border-slate-700 transition-all space-y-3"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
                             <div className="flex items-center gap-2">
-                              <span className="font-mono font-semibold text-slate-100">{tool.name}</span>
-                              <span className="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300 capitalize border border-slate-700">
-                                {tool.category.replace('_', ' ')}
+                              <h3 className="font-semibold text-base text-white hover:text-indigo-300 transition-colors">
+                                {job.title}
+                              </h3>
+                              <span
+                                className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
+                                  job.source === 'Indeed'
+                                    ? 'bg-blue-500/10 text-blue-400 border-blue-500/20'
+                                    : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                                }`}
+                              >
+                                Source: {job.source}
                               </span>
                             </div>
-                            <span
-                              className={`px-2 py-0.5 rounded-full text-[10px] font-medium flex items-center gap-1 ${
-                                tool.enabled
-                                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                                  : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                              }`}
-                            >
-                              {tool.enabled ? (
+                            <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400 mt-1">
+                              <span className="font-medium text-slate-300 flex items-center gap-1">
+                                <Building className="w-3.5 h-3.5 text-slate-500" />
+                                {job.company}
+                              </span>
+                              <span>•</span>
+                              <span className="flex items-center gap-1">
+                                <MapPin className="w-3.5 h-3.5 text-slate-500" />
+                                {job.location}
+                              </span>
+                              {job.workArrangement && job.workArrangement !== 'Not Specified' && (
                                 <>
-                                  <ShieldCheck className="w-3 h-3" /> Enabled
-                                </>
-                              ) : (
-                                <>
-                                  <ShieldAlert className="w-3 h-3" /> Blocked
+                                  <span>•</span>
+                                  <span className="flex items-center gap-1 text-indigo-300">
+                                    <Clock className="w-3.5 h-3.5" />
+                                    {job.workArrangement}
+                                  </span>
                                 </>
                               )}
-                            </span>
-                          </div>
-                          <p className="text-slate-400 leading-relaxed mb-1">{tool.description}</p>
-                          {tool.reason && (
-                            <div className="text-[11px] text-rose-300/90 font-mono mt-1 pt-1 border-t border-rose-900/30">
-                              Policy: {tool.reason}
+                              {job.salary && job.salary !== 'Not Disclosed' && (
+                                <>
+                                  <span>•</span>
+                                  <span className="flex items-center gap-1 text-emerald-400 font-mono">
+                                    <DollarSign className="w-3.5 h-3.5" />
+                                    {job.salary}
+                                  </span>
+                                </>
+                              )}
                             </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="p-8 text-center text-xs text-slate-500 border border-dashed border-slate-800 rounded-xl space-y-2">
-                      <p>
-                        {mcpStatus?.status === 'requires_auth'
-                          ? 'The MCP service requires authentication.'
-                          : mcpStatus?.status === 'unavailable'
-                            ? 'The career-data MCP service is currently unavailable.'
-                            : 'No tools discovered or matching current filter.'}
-                      </p>
-                      <button
-                        onClick={handleRefreshMcp}
-                        className="text-indigo-400 underline hover:text-indigo-300"
-                      >
-                        Try Reconnecting
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {diagnosticTab === 'executions' && (
-                <div className="space-y-3">
-                  <p className="text-xs text-slate-400">
-                    Live execution log of tools called by Gemini during conversations with the assistant:
-                  </p>
-                  {mcpStatus?.recentExecutions && mcpStatus.recentExecutions.length > 0 ? (
-                    mcpStatus.recentExecutions.map(item => (
-                      <div
-                        key={item.id}
-                        className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono space-y-2"
-                      >
-                        <div className="flex items-center justify-between text-indigo-300 font-semibold">
-                          <span>⚙ {item.name}</span>
-                          <span className="text-[10px] text-slate-500">{new Date(item.timestamp).toLocaleString()}</span>
-                        </div>
-                        <div className="bg-slate-900/80 p-2 rounded border border-slate-800 text-slate-300">
-                          <span className="text-slate-500 block text-[10px]">ARGUMENTS:</span>
-                          <pre className="overflow-x-auto text-[11px]">{JSON.stringify(item.args, null, 2)}</pre>
-                        </div>
-                        {item.error ? (
-                          <div className="text-rose-400 bg-rose-950/30 p-2 rounded border border-rose-900/50">
-                            Error: {item.error}
                           </div>
-                        ) : (
-                          <div className="bg-slate-900/80 p-2 rounded border border-slate-800 text-slate-300">
-                            <span className="text-slate-500 block text-[10px]">RESULT:</span>
-                            <pre className="overflow-x-auto text-[11px]">
-                              {JSON.stringify(item.result, null, 2)}
-                            </pre>
+
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => {
+                                setSelectedJob(job);
+                                setJobsSubView('details');
+                                handleSelectJobForMatching(job);
+                              }}
+                              className="px-3.5 py-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition-colors"
+                            >
+                              View Job
+                            </button>
+                            <button
+                              onClick={() => handleSelectJobForMatching(job)}
+                              className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white shadow-sm transition-all flex items-center gap-1.5"
+                            >
+                              <Sparkles className="w-3 h-3 text-indigo-200" />
+                              <span>Match Resume</span>
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Skills Preview */}
+                        {job.requiredSkills && job.requiredSkills.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5 pt-1">
+                            {job.requiredSkills.slice(0, 6).map((skill, sIdx) => (
+                              <span
+                                key={sIdx}
+                                className="px-2 py-0.5 rounded text-[11px] bg-slate-950 text-slate-300 border border-slate-800"
+                              >
+                                {skill}
+                              </span>
+                            ))}
                           </div>
                         )}
                       </div>
-                    ))
-                  ) : (
-                    <div className="p-8 text-center text-xs text-slate-500 border border-dashed border-slate-800 rounded-xl">
-                      No tool executions recorded in this session yet. Ask Gemini a question about jobs, labor stats, or skills to trigger MCP tool invocation.
+                    ))}
+                  </div>
+                ) : (
+                  !isSearchingJobs &&
+                  hasSearched && (
+                    <div className="p-12 text-center border border-dashed border-slate-800 rounded-2xl space-y-3">
+                      <Briefcase className="w-8 h-8 text-slate-600 mx-auto" />
+                      <p className="text-sm text-slate-400">
+                        {searchError || 'No live jobs retrieved. You can adjust your job title or location criteria.'}
+                      </p>
                     </div>
-                  )}
-                </div>
-              )}
+                  )
+                )}
+              </div>
+            )}
 
-              {diagnosticTab === 'policy' && (
-                <div className="space-y-4 text-xs text-slate-300 leading-relaxed">
-                  <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
-                    <h4 className="font-semibold text-white flex items-center gap-2">
-                      <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                      Read-Only Safety Guarantee
-                    </h4>
-                    <p className="text-slate-400">
-                      All tools from external MCP gateways are treated as untrusted capabilities. The filtering layer in <code className="text-indigo-300">lib/mcp/toolFilter.ts</code> inspects both tool names and metadata.
+            {/* SUB-VIEW 2: JOB DETAILS & RESUME MATCHING */}
+            {jobsSubView === 'details' && selectedJob && (
+              <div className="space-y-6">
+                {/* Back Link */}
+                <button
+                  onClick={() => setJobsSubView('list')}
+                  className="text-xs text-slate-400 hover:text-white flex items-center gap-1.5 transition-colors"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Back to Matched Jobs</span>
+                </button>
+
+                {/* Job Header Card */}
+                <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h2 className="text-xl font-bold text-white tracking-tight">{selectedJob.title}</h2>
+                        <span
+                          className={`text-xs font-semibold px-2.5 py-0.5 rounded-full border ${
+                            selectedJob.source === 'Indeed'
+                              ? 'bg-blue-500/10 text-blue-400 border-blue-500/20'
+                              : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                          }`}
+                        >
+                          Source: {selectedJob.source}
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400 mt-1">
+                        <span className="font-semibold text-slate-200">{selectedJob.company}</span>
+                        <span>•</span>
+                        <span>{selectedJob.location}</span>
+                        {selectedJob.workArrangement && <span>• {selectedJob.workArrangement}</span>}
+                        {selectedJob.salary && selectedJob.salary !== 'Not Disclosed' && (
+                          <span className="text-emerald-400 font-mono">• {selectedJob.salary}</span>
+                        )}
+                        {selectedJob.url && (
+                          <a
+                            href={selectedJob.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-indigo-400 hover:underline flex items-center gap-1"
+                          >
+                            <span>Original Listing</span>
+                            <ExternalLink className="w-3 h-3" />
+                          </a>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Primary Action Button */}
+                    <button
+                      onClick={handlePolishResume}
+                      disabled={isPolishingResume}
+                      className="px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs shadow-lg shadow-indigo-600/30 transition-all flex items-center gap-2"
+                    >
+                      <Sparkles className="w-4 h-4 text-indigo-200" />
+                      <span>Polish My Resume For This Job</span>
+                    </button>
+                  </div>
+
+                  {/* AI Resume Match Section */}
+                  <div className="p-4 rounded-xl bg-slate-950 border border-indigo-950/60 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold uppercase tracking-wider text-indigo-400">
+                          Resume Alignment Analysis
+                        </span>
+                        <span className="text-[10px] text-slate-500">(AI-generated estimate)</span>
+                      </div>
+                      {jobMatchResult && (
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-lg font-bold text-emerald-400 font-mono">
+                            {jobMatchResult.matchScore}%
+                          </span>
+                          <span className="text-[11px] text-slate-400">Estimated Match</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {isMatchingResume ? (
+                      <p className="text-xs text-slate-400 animate-pulse">
+                        Comparing your resume with job requirements...
+                      </p>
+                    ) : jobMatchResult ? (
+                      <div className="space-y-3">
+                        <p className="text-xs text-slate-300 leading-relaxed">
+                          {jobMatchResult.relevanceExplanation}
+                        </p>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                          {/* Matching Skills */}
+                          <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-1.5">
+                            <span className="text-[11px] font-semibold text-emerald-400 flex items-center gap-1">
+                              <Check className="w-3.5 h-3.5" />
+                              Matching Skills ({jobMatchResult.matchingSkills.length})
+                            </span>
+                            <div className="flex flex-wrap gap-1">
+                              {jobMatchResult.matchingSkills.map((s, idx) => (
+                                <span
+                                  key={idx}
+                                  className="text-[10px] px-2 py-0.5 rounded bg-emerald-950/50 text-emerald-300 border border-emerald-800/40"
+                                >
+                                  {s}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Missing / Unclear Requirements */}
+                          <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-1.5">
+                            <span className="text-[11px] font-semibold text-amber-400 flex items-center gap-1">
+                              <Info className="w-3.5 h-3.5" />
+                              Areas to Clarify ({jobMatchResult.missingRequirements.length})
+                            </span>
+                            <div className="flex flex-wrap gap-1">
+                              {jobMatchResult.missingRequirements.map((r, idx) => (
+                                <span
+                                  key={idx}
+                                  className="text-[10px] px-2 py-0.5 rounded bg-amber-950/40 text-amber-300 border border-amber-800/40"
+                                >
+                                  {r}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {/* Job Description Text */}
+                  <div className="space-y-3 pt-2">
+                    <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Job Description</h3>
+                    <div className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap bg-slate-950/60 p-4 rounded-xl border border-slate-800 max-h-96 overflow-y-auto">
+                      {selectedJob.description}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* SUB-VIEW 3: RESUME POLISHING & DOWNLOAD WORKSPACE */}
+            {jobsSubView === 'polish' && selectedJob && (
+              <div className="space-y-6">
+                {/* Back button */}
+                <button
+                  onClick={() => setJobsSubView('details')}
+                  className="text-xs text-slate-400 hover:text-white flex items-center gap-1.5 transition-colors"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Back to Job Details</span>
+                </button>
+
+                <div className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-xl bg-slate-900 border border-slate-800">
+                  <div>
+                    <h2 className="text-base font-bold text-white tracking-tight">
+                      Polished Resume for {selectedJob.title}
+                    </h2>
+                    <p className="text-xs text-slate-400">
+                      Tailored specifically against {selectedJob.company}'s requirements without inventing any facts.
                     </p>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <div className="p-3.5 rounded-xl bg-emerald-950/20 border border-emerald-900/40 space-y-2">
-                      <span className="font-semibold text-emerald-400 block">Allowed Capabilities (Read-Only & Local)</span>
-                      <ul className="list-disc list-inside space-y-1 text-slate-300 text-[11px]">
-                        <li>Job search and opening queries</li>
-                        <li>Resume ATS evaluation and keyword scoring</li>
-                        <li>Labor statistics and employment trend queries (ILOSTAT, OECD)</li>
-                        <li>Standardized competency taxonomy navigation</li>
-                        <li>Local content generation (resume tailoring, cover letters)</li>
-                      </ul>
-                    </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleCopyResume}
+                      className="px-3.5 py-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition-colors flex items-center gap-1.5"
+                    >
+                      {copied ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          <span className="text-emerald-400">Copied</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" />
+                          <span>Copy</span>
+                        </>
+                      )}
+                    </button>
 
-                    <div className="p-3.5 rounded-xl bg-rose-950/20 border border-rose-900/40 space-y-2">
-                      <span className="font-semibold text-rose-400 block">Blocked Capabilities (Side Effects)</span>
-                      <ul className="list-disc list-inside space-y-1 text-slate-300 text-[11px]">
-                        <li>Automatic job applying or submission (JobGPT AutoApply, etc.)</li>
-                        <li>Sending emails, SMS, or private messages</li>
-                        <li>Modifying or creating external accounts</li>
-                        <li>Financial transactions, payments, or billing</li>
-                        <li>Destructive deletion or database record mutations</li>
-                      </ul>
-                    </div>
+                    <button
+                      onClick={handleDownloadPdf}
+                      className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white shadow-sm transition-all flex items-center gap-1.5"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Download PDF</span>
+                    </button>
                   </div>
                 </div>
-              )}
-            </div>
 
-            {/* Modal Footer */}
-            <div className="px-6 py-3 border-t border-slate-800 flex items-center justify-between bg-slate-950/50 text-xs">
-              <span className="text-slate-500">
-                Last checked: {mcpStatus?.lastChecked ? new Date(mcpStatus.lastChecked).toLocaleTimeString() : 'Never'}
-              </span>
-              <button
-                onClick={() => setShowDiagnostics(false)}
-                className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition-colors"
-              >
-                Close Inspector
-              </button>
-            </div>
+                {isPolishingResume ? (
+                  <div className="p-16 text-center border border-dashed border-slate-800 rounded-2xl space-y-3">
+                    <Sparkles className="w-8 h-8 text-indigo-400 animate-spin mx-auto" />
+                    <p className="text-sm text-slate-300 font-medium">Polishing resume with Gemini...</p>
+                    <p className="text-xs text-slate-500 max-w-md mx-auto">
+                      Emphasizing relevant experiences and truthful keywords while adhering strictly to your actual background.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    {/* Left: Suggested Changes / Recommendations */}
+                    <div className="space-y-4">
+                      <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+                        <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                          Suggested Modifications
+                        </h3>
+                        <p className="text-[11px] text-slate-400">
+                          How your existing background was mapped to target job requirements:
+                        </p>
+
+                        <div className="space-y-3">
+                          {polishResult?.recommendations && polishResult.recommendations.length > 0 ? (
+                            polishResult.recommendations.map((rec, i) => (
+                              <div
+                                key={i}
+                                className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-xs space-y-1.5"
+                              >
+                                <div className="text-slate-400 text-[10px] uppercase font-semibold">
+                                  Job Requirement:
+                                </div>
+                                <div className="text-slate-200 font-medium">{rec.requirement}</div>
+
+                                <div className="text-slate-400 text-[10px] uppercase font-semibold pt-1">
+                                  Your Resume:
+                                </div>
+                                <div className="text-slate-300 text-[11px] italic">{rec.resumeEvidence}</div>
+
+                                <div className="text-indigo-400 text-[10px] uppercase font-semibold pt-1">
+                                  Recommendation:
+                                </div>
+                                <div className="text-indigo-200 text-[11px]">{rec.recommendation}</div>
+                              </div>
+                            ))
+                          ) : (
+                            <p className="text-xs text-slate-500">No specific change annotations provided.</p>
+                          )}
+                        </div>
+                      </div>
+
+                      {polishResult?.summaryOfChanges && (
+                        <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+                          <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                            Enhancements Made
+                          </h4>
+                          <ul className="list-disc list-inside text-xs text-slate-300 space-y-1">
+                            {polishResult.summaryOfChanges.map((change, idx) => (
+                              <li key={idx} className="leading-relaxed">
+                                {change}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Right: Editable Polished Resume */}
+                    <div className="lg:col-span-2 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                          <Edit3 className="w-3.5 h-3.5" />
+                          <span>Editable Resume Draft</span>
+                        </label>
+                        <span className="text-[11px] text-slate-500">
+                          Edit directly before downloading as PDF or copying
+                        </span>
+                      </div>
+                      <textarea
+                        rows={22}
+                        value={editableResume}
+                        onChange={(e) => setEditableResume(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl p-4 text-xs font-mono text-slate-200 leading-relaxed placeholder-slate-600 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
-        </div>
-      )}
+        )}
+      </main>
+
+      {/* Footer */}
+      <footer className="border-t border-slate-800/80 px-6 py-4 text-center text-xs text-slate-500 bg-slate-950 shrink-0">
+        <p>JobSeeker AI — Focused Job Search & Resume Polishing for Individual Candidates.</p>
+        <p className="text-[11px] text-slate-600 mt-1">
+          Zero automated submissions • Read-only external job discovery • Honest resume representation
+        </p>
+      </footer>
     </div>
   );
 }
