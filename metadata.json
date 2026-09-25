@@ -1,0 +1,6 @@
+{
+  "name": "CareerPilot AI - Smart HR & Career Assistant",
+  "description": "AI HR and Career Assistant powered by Gemini and Smithery MCP gateway for real-time job search, career analytics, resume evaluation, and labor statistics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
