@@ -12,6 +12,11 @@ import {
   matchResumeToJob,
   polishResume,
 } from './geminiService.ts';
+import {
+  scrapeWeb,
+  scrapeGoogleSerp,
+  verifyHasDataScrape,
+} from './hasdataScraper.ts';
 
 dotenv.config();
 
@@ -124,3 +129,57 @@ app.post('/api/resume/polish', async (req: Request, res: Response) => {
     res.status(500).json({ error: 'Failed to polish resume', details: err?.message || 'Unknown error' });
   }
 });
+
+// HasData Scraping verification endpoint (single request, checks credit/key)
+app.get('/api/hasdata/verify', async (_req: Request, res: Response) => {
+  const result = await verifyHasDataScrape();
+  res.status(result.status || (result.success ? 200 : 500)).json(result);
+});
+
+// HasData Web Scraping proxy endpoint
+app.post('/api/hasdata/scrape', async (req: Request, res: Response) => {
+  try {
+    const { url, extractRules, outputFormat, screenshot, jsRendering, proxyType } = req.body;
+    if (!url) {
+      res.status(400).json({ error: 'URL is required for web scraping.' });
+      return;
+    }
+    const data = await scrapeWeb({ url, extractRules, outputFormat, screenshot, jsRendering, proxyType });
+    res.json(data);
+  } catch (err: any) {
+    console.error('HasData scrape error:', err);
+    res.status(err?.status || 500).json({
+      error: err?.message || 'Web scraping failed',
+      details: err?.response || null,
+    });
+  }
+});
+
+// HasData Google SERP proxy endpoint
+app.get('/api/hasdata/serp', async (req: Request, res: Response) => {
+  try {
+    const { q, location, domain, gl, hl, num, page, deviceType } = req.query;
+    if (!q || typeof q !== 'string') {
+      res.status(400).json({ error: 'Query parameter "q" is required.' });
+      return;
+    }
+    const data = await scrapeGoogleSerp({
+      q,
+      location: location as string | undefined,
+      domain: domain as string | undefined,
+      gl: gl as string | undefined,
+      hl: hl as string | undefined,
+      num: num ? Number(num) : undefined,
+      page: page ? Number(page) : undefined,
+      deviceType: deviceType as any,
+    });
+    res.json(data);
+  } catch (err: any) {
+    console.error('HasData SERP error:', err);
+    res.status(err?.status || 500).json({
+      error: err?.message || 'Google SERP scraping failed',
+      details: err?.response || null,
+    });
+  }
+});
+
